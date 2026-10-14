@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3D Model Viewer — 3DCGchan</title>
+<style>
+:root{--ac:#c9b48a;--bg:#1c1c1c;--sf:#262626;--ln:#3f3f3f;--tx:#ececec;--mu:#b9b9b9}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:Arial,"Noto Sans JP",sans-serif;overflow:hidden}
+#c{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+#c:active{cursor:grabbing}
+.bar{position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;background:linear-gradient(0deg,rgba(20,20,20,.92),rgba(20,20,20,0));justify-content:center}
+.bar button{font:inherit;font-size:12px;letter-spacing:.06em;color:var(--mu);background:rgba(28,28,28,.85);border:1px solid var(--ln);padding:6px 12px;border-radius:2px;cursor:pointer}
+.bar button:hover{color:var(--tx);border-color:#666}
+.bar button[aria-pressed=true]{color:var(--ac);border-color:var(--ac);background:rgba(201,180,138,.12)}
+.info{position:absolute;left:12px;top:10px;font-size:11px;letter-spacing:.1em;color:var(--mu);line-height:1.7;pointer-events:none;text-shadow:0 1px 2px #000}
+.info b{color:var(--tx);font-size:13px;letter-spacing:.08em;display:block}
+.tools{position:absolute;right:10px;top:10px;display:flex;gap:6px}
+.tools button{font:inherit;font-size:11px;color:var(--mu);background:rgba(28,28,28,.85);border:1px solid var(--ln);padding:5px 10px;border-radius:2px;cursor:pointer}
+.tools button[aria-pressed=true]{color:var(--ac);border-color:var(--ac)}
+.hint{position:absolute;right:12px;bottom:56px;font-size:10.5px;color:#8a8a8a;letter-spacing:.06em;pointer-events:none}
+#load{position:absolute;inset:0;display:grid;place-items:center;font-size:12px;letter-spacing:.14em;color:var(--mu)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="load">LOADING…</div>
+<div class="info" id="info"></div>
+<div class="tools"><button id="rot" aria-pressed="true">自動回転</button><button id="reset">視点リセット</button></div>
+<div class="hint">ドラッグ：回転 ／ ホイール・ピンチ：拡大 ／ 右ドラッグ：移動</div>
+<div class="bar" id="bar"></div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+
+const q=new URLSearchParams(location.search);
+const MODEL=q.get('model')||'RedPost.glb';
+const TITLE=q.get('title')||'郵便ポスト RED POST';
+const TEX=q.get('tex')||'';
+
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x1c1c1c);
+const pmrem=new THREE.PMREMGenerator(renderer);
+scene.environment=pmrem.fromScene(new RoomEnvironment(),0.04).texture;
+const key=new THREE.DirectionalLight(0xffffff,1.2); key.position.set(2,3,2); scene.add(key);
+const cam=new THREE.PerspectiveCamera(35,1,0.01,100);
+const ctl=new OrbitControls(cam,canvas); ctl.enableDamping=true; ctl.autoRotate=true; ctl.autoRotateSpeed=1.2;
+const grid=new THREE.GridHelper(4,40,0x3f3f3f,0x2a2a2a); scene.add(grid);
+
+// 表示モード用マテリアル
+const chanVS=`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`;
+const chanFS=`uniform sampler2D map;uniform int ch;varying vec2 vUv;void main(){vec4 t=texture2D(map,vUv);vec3 c=t.rgb;
+ if(ch==1)c=vec3(t.g);else if(ch==2)c=vec3(t.b);gl_FragColor=vec4(c,1.);}`;
+let mesh,orig,modes={},wire,start={};
+
+function frame(obj){
+  const b=new THREE.Box3().setFromObject(obj), s=b.getSize(new THREE.Vector3()), c=b.getCenter(new THREE.Vector3());
+  const r=Math.max(s.x,s.y,s.z);
+  ctl.target.copy(c); cam.position.set(c.x+r*1.1,c.y+r*0.45,c.z+r*1.6); cam.near=r/100; cam.far=r*50; cam.updateProjectionMatrix();
+  grid.scale.setScalar(r/2); grid.position.y=b.min.y;
+  start={p:cam.position.clone(),t:ctl.target.clone()};
+}
+
+new GLTFLoader().load(MODEL,g=>{
+  const root=g.scene; scene.add(root);
+  root.traverse(o=>{ if(o.isMesh&&!mesh) mesh=o; });
+  orig=mesh.material;
+  const m=orig, info=document.getElementById('info');
+  const tris=(mesh.geometry.index?mesh.geometry.index.count:mesh.geometry.attributes.position.count)/3;
+  const tw=m.map?m.map.image.width:0, th=m.map?m.map.image.height:0;
+  info.innerHTML=`<b>${TITLE}</b>△ ${Math.round(tris).toLocaleString()} tris ／ ${mesh.geometry.attributes.position.count.toLocaleString()} verts${TEX?`<br>${TEX}`:''}`;
+  const unlit=(map)=>new THREE.MeshBasicMaterial({map});
+  const chan=(map,ch)=>new THREE.ShaderMaterial({uniforms:{map:{value:map},ch:{value:ch}},vertexShader:chanVS,fragmentShader:chanFS});
+  const clay=new THREE.MeshStandardMaterial({color:0xbdbdbd,roughness:.75,metalness:0});
+  const clayDark=new THREE.MeshStandardMaterial({color:0x4a4a4a,roughness:.8,metalness:0,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1});
+  wire=new THREE.LineSegments(new THREE.WireframeGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0xc9b48a,transparent:true,opacity:.9}));
+  wire.visible=false; mesh.add(wire);
+  modes={
+    '完成':{mat:orig},
+    'ワイヤー':{mat:clayDark,wire:true},
+    'クレイ':{mat:clay},
+    'Base Color':m.map?{mat:unlit(m.map)}:null,
+    'Normal':m.normalMap?{mat:unlit(m.normalMap)}:null,
+    'Roughness':m.roughnessMap?{mat:chan(m.roughnessMap,1)}:null,
+    'Metallic':m.metalnessMap?{mat:chan(m.metalnessMap,2)}:null,
+  };
+  const bar=document.getElementById('bar');
+  Object.entries(modes).forEach(([k,v],i)=>{ if(!v) return;
+    const b=document.createElement('button'); b.textContent=k; b.setAttribute('aria-pressed',i===0);
+    b.onclick=()=>{ bar.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b)); mesh.material=v.mat; wire.visible=!!v.wire; };
+    bar.appendChild(b); });
+  frame(root); document.getElementById('load').remove();
+},undefined,e=>{document.getElementById('load').textContent='モデルを読み込めませんでした';console.error(e);});
+
+const rot=document.getElementById('rot');
+rot.onclick=()=>{ctl.autoRotate=!ctl.autoRotate;rot.setAttribute('aria-pressed',ctl.autoRotate);};
+document.getElementById('reset').onclick=()=>{cam.position.copy(start.p);ctl.target.copy(start.t);};
+canvas.addEventListener('pointerdown',()=>{ if(ctl.autoRotate){ctl.autoRotate=false;rot.setAttribute('aria-pressed',false);} });
+
+function resize(){const w=canvas.clientWidth,h=canvas.clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix();}
+new ResizeObserver(resize).observe(canvas); resize();
+renderer.setAnimationLoop(()=>{ctl.update();renderer.render(scene,cam);});
+</script>
+</body>
+</html>
